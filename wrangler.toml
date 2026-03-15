@@ -1,0 +1,10 @@
+name = "worker-gateway"
+main = "worker.js"
+compatibility_date = "2026-03-15"
+workers_dev = false
+
+# Bind to your custom domain route:
+# https://assets.an1688.com/json/*
+routes = [
+  { pattern = "assets.an1688.com/json/*", zone_name = "an1688.com" }
+]
