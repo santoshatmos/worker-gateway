@@ -9,7 +9,7 @@
 
 // Worker base URL
 
-const WORKER_BASE_URLS = (process.env.WORKER_BASE_URLS || process.env.WORKER_BASE_URL || "https://assets.an1688.com;https://snapshot.hudie123.xyz")
+const WORKER_BASE_URLS = (process.env.WORKER_BASE_URLS || process.env.WORKER_BASE_URL || "https://openclaw.atmoslogic.com;https://snapshot.hudie123.xyz")
   .split(/[;,\n\r]/)
   .map((value) => value.trim().replace(/\/+$/, ""))
   .filter(Boolean);
