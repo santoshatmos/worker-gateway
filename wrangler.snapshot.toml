@@ -4,8 +4,9 @@ compatibility_date = "2026-03-15"
 workers_dev = false
 
 routes = [
-  { pattern = "snapshot.hudie123.xyz/json/*", zone_name = "hudie123.xyz" },
-  { pattern = "snapshot.hudie123.xyz/latest.json", zone_name = "hudie123.xyz" }
+  { pattern = "snapshot.hudie123.xyz/api/v1/assets*", zone_name = "hudie123.xyz" },
+  { pattern = "snapshot.hudie123.xyz/api/v1/latest", zone_name = "hudie123.xyz" },
+  { pattern = "snapshot.hudie123.xyz/api/v1/orderinfo", zone_name = "hudie123.xyz" }
 ]
 
 [vars]
