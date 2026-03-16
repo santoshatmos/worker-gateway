@@ -44,7 +44,7 @@ wrangler login
 3. 按域名分别部署 Worker
 
 ```bash
-wrangler deploy -c wrangler.assets.toml
+wrangler deploy -c wrangler.openclaw.toml
 wrangler deploy -c wrangler.snapshot.toml
 ```
 

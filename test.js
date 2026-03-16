@@ -17,6 +17,8 @@ const TEST_SUB_ID = process.env.TEST_SUB_ID || "f86607a9cc48fc6f4c98d35f058bea01
 const TEST_KIND = process.env.TEST_KIND || "openclaw";
 const TEST_UA = process.env.TEST_UA || "Clash";
 const CUSTOM_CLIENT_PATH = process.env.CUSTOM_CLIENT_PATH || `/api/v1/assets/${TEST_SUB_ID}`;
+const QUALITY_PROBE_COUNT = Number.parseInt(process.env.QUALITY_PROBE_COUNT || "10", 10);
+const QUALITY_PROBE_TIMEOUT_MS = Number.parseInt(process.env.QUALITY_PROBE_TIMEOUT_MS || "8000", 10);
 
 async function readBodyPreview(response) {
   const text = await response.text();
@@ -92,6 +94,67 @@ async function assertLatestPayload(response, label) {
   }
 }
 
+async function probeWorkerNetworkQuality(workerBaseUrl) {
+  const probeUrl = `${workerBaseUrl}/api/v1/assets/saf`;
+  const results = [];
+
+  for (let i = 0; i < QUALITY_PROBE_COUNT; i += 1) {
+    const startedAt = Date.now();
+    let status = "ERR";
+    let error = "";
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), QUALITY_PROBE_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(probeUrl, {
+        method: "POST",
+        headers: {
+          "User-Agent": TEST_UA,
+          "X-Sub-ID": TEST_SUB_ID,
+          "X-Sub-Kind": TEST_KIND,
+        },
+        signal: controller.signal,
+      });
+      status = String(response.status);
+    } catch (err) {
+      error = err?.name === "AbortError" ? "TIMEOUT" : (err?.message || String(err));
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const elapsedMs = Date.now() - startedAt;
+    results.push({ index: i + 1, status, elapsedMs, error });
+    console.log(status === "ERR" ? (error || "ERR") : status);
+  }
+
+  const okCount = results.filter((item) => item.status === "200").length;
+  const timeoutCount = results.filter((item) => item.error === "TIMEOUT").length;
+  const errorCount = results.filter((item) => item.status === "ERR").length;
+  const statusBuckets = results.reduce((acc, item) => {
+    const key = item.status === "ERR" ? item.error || "ERR" : item.status;
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+  const avgLatencyMs = results.length > 0
+    ? Math.round(results.reduce((sum, item) => sum + item.elapsedMs, 0) / results.length)
+    : 0;
+
+  console.log(`\n[${workerBaseUrl} quality] probe-url=${probeUrl}`);
+  for (const item of results) {
+    const suffix = item.error ? ` error=${item.error}` : "";
+    console.log(`[${workerBaseUrl} quality] #${item.index} status=${item.status} elapsedMs=${item.elapsedMs}${suffix}`);
+  }
+  console.log(`[${workerBaseUrl} quality] summary ok=${okCount}/${results.length} timeout=${timeoutCount} error=${errorCount} avgLatencyMs=${avgLatencyMs} buckets=${JSON.stringify(statusBuckets)}`);
+
+  return {
+    worker: workerBaseUrl,
+    test: "quality-probe",
+    ok: okCount > 0,
+    error: okCount > 0 ? null : `No successful probe responses. buckets=${JSON.stringify(statusBuckets)}`,
+  };
+}
+
 async function testCustomClientPost(workerBaseUrl) {
   const customClientUrl = `${workerBaseUrl}${CUSTOM_CLIENT_PATH}`;
   const response = await fetch(customClientUrl, {
@@ -153,8 +216,11 @@ async function testWorker(workerBaseUrl) {
   console.log(`TEST_KIND=${TEST_KIND}`);
   console.log(`TEST_UA=${TEST_UA}`);
   console.log(`CUSTOM_CLIENT_PATH=${CUSTOM_CLIENT_PATH}`);
+  console.log(`QUALITY_PROBE_COUNT=${QUALITY_PROBE_COUNT}`);
+  console.log(`QUALITY_PROBE_TIMEOUT_MS=${QUALITY_PROBE_TIMEOUT_MS}`);
 
   const results = [];
+  results.push(await probeWorkerNetworkQuality(workerBaseUrl));
   for (const tc of TEST_CASES) {
     try {
       await tc.fn(workerBaseUrl);
