@@ -4,10 +4,11 @@ compatibility_date = "2026-03-15"
 workers_dev = false
 
 routes = [
-  { pattern = "assets.an1688.com/json/*", zone_name = "an1688.com" }
+  { pattern = "assets.an1688.com/json/*", zone_name = "an1688.com" },
+  { pattern = "assets.an1688.com/latest.json", zone_name = "an1688.com" }
 ]
 
 [vars]
 ROUTE_PREFIX = "/json"
-ORIGIN_BASE = "https://hudie.an1688.com;https://api.an1688.com;https://api.hudie123.xyz"
+ORIGIN_BASE = "https://api.hudie123.xyz;https://hudie.an1688.com;https://api.an1688.com"
 ORIGIN_SUB_PATH_PREFIX = "/json"
