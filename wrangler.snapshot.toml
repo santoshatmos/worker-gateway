@@ -1,0 +1,13 @@
+name = "worker-gateway-snapshot"
+main = "worker.js"
+compatibility_date = "2026-03-15"
+workers_dev = false
+
+routes = [
+  { pattern = "snapshot.hudie123.xyz/json/*", zone_name = "hudie123.xyz" }
+]
+
+[vars]
+ROUTE_PREFIX = "/json"
+ORIGIN_BASE = "https://hudie.an1688.com;https://api.an1688.com;https://api.hudie123.xyz"
+ORIGIN_SUB_PATH_PREFIX = "/json"

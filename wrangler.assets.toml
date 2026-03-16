@@ -1,11 +1,8 @@
-name = "worker-gateway-template"
+name = "worker-gateway-assets"
 main = "worker.js"
 compatibility_date = "2026-03-15"
 workers_dev = false
 
-# Deploy with this file only for ad-hoc testing.
-# For production, copy this file (or use wrangler.<env>.toml)
-# with a unique worker name + route binding per domain.
 routes = [
   { pattern = "assets.an1688.com/json/*", zone_name = "an1688.com" }
 ]

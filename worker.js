@@ -1,21 +1,8 @@
-/**
- * Cloudflare Worker: Subscription proxy/obfuscation gateway
- *
- * Requirements implemented:
- * - Only allow POST requests (others return 404)
- * - Route only handles /json/* (and /json)
- * - Read subscription ID from header: X-Sub-ID
- * - Validate ID format: /^[a-f0-9]{32}$/
- * - User-Agent whitelist check
- * - Build origin URL: https://hudie.an1688.com/s/{id}
- * - Fetch origin and stream response back without body transformation
- * - No global storage of request-specific ID or response
- * - Return 502 when origin fetch throws
- */
-
-const ORIGIN_BASE = 'https://hudie.an1688.com';
 const SUB_ID_HEADER = 'X-Sub-ID';
-const SUB_ID_RE = /^[a-f0-9]{32}$/;
+const SUB_ID_HEADER_ALT = 'sub_id';
+const SUB_ID_RE = /^[a-z0-9_-]{3,128}$/i;
+const KIND_RE = /^[a-z0-9-]{1,24}$/i;
+let preferredOriginBase = '';
 
 const UA_WHITELIST = [
   /clash/i,
@@ -24,6 +11,13 @@ const UA_WHITELIST = [
   /hiddify/i,
   /v2rayn/i,
   /v2rayng/i,
+  /quantumult/i,
+  /surge/i,
+  /stash/i,
+  /clash-meta/i,
+  /bytefly/i,
+  /curl/i,
+  /mozilla/i,
 ];
 
 function isAllowedUa(ua) {
@@ -39,60 +33,217 @@ function forbidden(message = 'Forbidden') {
   return new Response(message, { status: 403 });
 }
 
+function parseBaseUrls(raw) {
+  return String(raw || '')
+    .split(/[;,\n]/)
+    .map((x) => x.trim().replace(/\/+$/, ''))
+    .filter((x) => /^https?:\/\//i.test(x));
+}
+
+function getOriginBases(env) {
+  const fromLatest = parseBaseUrls(env.LATEST_SOURCE_URLS || '');
+  const fromOrigin = parseBaseUrls(env.ORIGIN_BASE || '');
+  const dedup = [...new Set([...fromLatest, ...fromOrigin])];
+  if (dedup.length === 0) {
+    dedup.push('https://hudie.an1688.com');
+  }
+
+  if (preferredOriginBase && dedup.includes(preferredOriginBase)) {
+    return [preferredOriginBase, ...dedup.filter((x) => x !== preferredOriginBase)];
+  }
+
+  return dedup;
+}
+
+function latestOriginResponse(env) {
+  const urls = getOriginBases(env);
+  const payload = {
+    latest: {
+      url: urls.join('; '),
+    },
+  };
+  return new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'public, max-age=60',
+    },
+  });
+}
+
+function normalizePrefix(rawPrefix) {
+  const prefix = `/${String(rawPrefix || '/json')
+    .trim()
+    .replace(/^\/+/, '')
+    .replace(/\/+$/, '')}`;
+  return prefix === '/' ? '/json' : prefix;
+}
+
+function getOriginBase(env) {
+  return getOriginBases(env)[0];
+}
+
+function getOriginSubPathPrefix(env) {
+  return normalizePrefix(env.ORIGIN_SUB_PATH_PREFIX || '/json');
+}
+
+function getHeaderSubId(request) {
+  const xSubId = (request.headers.get(SUB_ID_HEADER) || '').trim();
+  if (SUB_ID_RE.test(xSubId)) {
+    return xSubId;
+  }
+
+  const subId = (request.headers.get(SUB_ID_HEADER_ALT) || '').trim();
+  if (SUB_ID_RE.test(subId)) {
+    return subId;
+  }
+
+  return '';
+}
+
+function splitPath(pathname) {
+  return String(pathname || '/')
+    .replace(/\/+$/, '')
+    .split('/')
+    .filter(Boolean);
+}
+
+function extractSubIdFromPath(pathname, routePrefix) {
+  const routeParts = splitPath(routePrefix);
+  const pathParts = splitPath(pathname);
+
+  if (pathParts.length < routeParts.length + 1) {
+    return '';
+  }
+
+  for (let i = 0; i < routeParts.length; i += 1) {
+    if (pathParts[i] !== routeParts[i]) {
+      return '';
+    }
+  }
+
+  const candidateId = (pathParts[routeParts.length] || '').trim();
+  if (!SUB_ID_RE.test(candidateId)) {
+    return '';
+  }
+
+  const kind = pathParts[routeParts.length + 1];
+  if (kind && !KIND_RE.test(kind)) {
+    return '';
+  }
+
+  return candidateId;
+}
+
+function isLegacyPrefixPath(pathname, routePrefix) {
+  const normalizedPath = String(pathname || '/').replace(/\/+$/, '');
+  return normalizedPath === routePrefix || normalizedPath.startsWith(`${routePrefix}/`);
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    const routePrefix = normalizePrefix(env.ROUTE_PREFIX || '/json');
 
-    // 1) Only POST is allowed
-    if (request.method !== 'POST') {
+    if (request.method === 'GET' && url.pathname === '/latest.json') {
+      return latestOriginResponse(env);
+    }
+
+    if (request.method !== 'GET' && request.method !== 'POST') {
       return notFound();
     }
 
-    // 2) Only /json and /json/* are handled
     const path = url.pathname;
-    if (!(path === '/json' || path === '/json/' || path.startsWith('/json/'))) {
-      return notFound();
+    let subId = extractSubIdFromPath(path, routePrefix);
+    const headerSubId = getHeaderSubId(request);
+    const isByteflyPost = request.method === 'POST' && headerSubId !== '';
+
+    if (isByteflyPost) {
+      subId = headerSubId;
+    } else if (!subId && isLegacyPrefixPath(path, routePrefix)) {
+      subId = headerSubId;
     }
 
-    // 3) User-Agent whitelist
+    if (!subId) {
+      return request.method === 'GET' ? notFound() : forbidden('Invalid subscription id');
+    }
+
     const ua = request.headers.get('User-Agent') || '';
     if (!isAllowedUa(ua)) {
       return forbidden('UA not allowed');
     }
 
-    // 4) Validate X-Sub-ID header
-    const subId = (request.headers.get(SUB_ID_HEADER) || '').trim();
-    if (!SUB_ID_RE.test(subId)) {
-      return forbidden('Invalid X-Sub-ID');
-    }
+    const originBases = getOriginBases(env);
+    const originSubPathPrefix = getOriginSubPathPrefix(env);
+    const cache = caches.default;
+    const canCache = request.method === 'GET';
+    const cacheKey = request.url;
 
-    // 5) Build origin URL. Ignore any extra path after /json/* by design.
-    const originUrl = `${ORIGIN_BASE}/s/${subId}`;
+    if (canCache) {
+      const cached = await cache.match(cacheKey);
+      if (cached) {
+        return cached;
+      }
+    }
 
     let upstream;
-    try {
-      upstream = await fetch(originUrl, {
-        method: 'GET',
-        headers: {
-          // Keep a stable UA to origin; do not forward client custom headers unnecessarily.
-          'User-Agent': 'assets-gateway/1.0',
-          'Accept': '*/*',
-        },
-        cf: {
-          cacheTtl: 0,
-          cacheEverything: false,
-        },
-      });
-    } catch (_) {
-      // 6) Origin fetch failure -> 502
-      return new Response('Bad Gateway', { status: 502 });
+    let fallback;
+    for (const originBase of originBases) {
+      const originPath = `${originBase}${originSubPathPrefix}/${subId}`;
+      const originUrl = isByteflyPost ? `${originPath}?envelope=1` : originPath;
+      try {
+        const response = await fetch(originUrl, {
+          method: 'GET',
+          headers: {
+            'User-Agent': 'assets-gateway/2.0',
+            'Accept': '*/*',
+          },
+          cf: {
+            cacheTtl: 0,
+            cacheEverything: false,
+          },
+        });
+        if (response.status >= 500) {
+          fallback = fallback || response;
+          continue;
+        }
+        preferredOriginBase = originBase;
+        upstream = response;
+        break;
+      } catch (_) {
+      }
     }
 
-    // 7) Stream origin response as-is (body untouched)
-    return new Response(upstream.body, {
+    if (!upstream) {
+      if (fallback) {
+        upstream = fallback;
+      } else {
+        return new Response('Bad Gateway', { status: 502 });
+      }
+    }
+
+    const headers = new Headers(upstream.headers);
+    headers.delete('server');
+    headers.delete('cf-ray');
+    headers.delete('x-powered-by');
+    headers.delete('via');
+    if (canCache && upstream.ok) {
+      headers.set('Cache-Control', 'public, max-age=60');
+    }
+
+    const response = new Response(upstream.body, {
       status: upstream.status,
       statusText: upstream.statusText,
-      headers: upstream.headers,
+      headers,
     });
+
+    if (canCache && upstream.ok) {
+      const cacheResponse = response.clone();
+      if (ctx && typeof ctx.waitUntil === 'function') {
+        ctx.waitUntil(cache.put(cacheKey, cacheResponse));
+      }
+    }
+
+    return response;
   },
 };
