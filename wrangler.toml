@@ -11,5 +11,5 @@ routes = [
 
 [vars]
 ROUTE_PREFIX = "/json"
-ORIGIN_BASE = "https://api.hudie123.xyz;https://vpn2.hudie123.xyz;https://hudie2.an1688.com;https://api2.an1688.com"
+ORIGIN_BASE = "https://api.hudie123.xyz;https://vpn2.hudie123.xyz;https://api2.an1688.com"
 ORIGIN_SUB_PATH_PREFIX = "/json"
