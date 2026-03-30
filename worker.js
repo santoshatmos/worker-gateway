@@ -1,9 +1,13 @@
 const SUB_ID_HEADER = 'X-Sub-ID';
-const SUB_ID_HEADER_ALT = 'sub_id';
 const SUB_KIND_HEADER = 'X-Sub-Kind';
-const SUB_KIND_HEADER_ALT = 'sub_kind';
 const SUB_ID_RE = /^[a-z0-9_-]{3,128}$/i;
 const KIND_RE = /^[a-z0-9-]{1,24}$/i;
+
+const ASSETS_PATH = '/api/v1/assets';
+const LATEST_PATH = '/api/v1/latest';
+const ORDERINFO_PATH = '/api/v1/orderinfo';
+const ORDERINFO_UPSTREAM_PATH = '/api/v1/orderinfo';
+
 let preferredOriginBase = '';
 
 const UA_WHITELIST = [
@@ -22,17 +26,66 @@ const UA_WHITELIST = [
   /mozilla/i,
 ];
 
+function logInfo(event, payload = {}) {
+  console.log(`[worker-gateway] ${event}`, JSON.stringify(payload));
+}
+
+function logWarn(event, payload = {}) {
+  console.warn(`[worker-gateway] ${event}`, JSON.stringify(payload));
+}
+
+function maskSubId(subId) {
+  if (!subId || subId.length <= 8) {
+    return '***';
+  }
+  return `${subId.slice(0, 4)}***${subId.slice(-4)}`;
+}
+
+function normalizePath(pathname) {
+  const normalized = String(pathname || '/').replace(/\/+$/, '');
+  return normalized || '/';
+}
+
 function isAllowedUa(ua) {
   if (!ua) return false;
   return UA_WHITELIST.some((re) => re.test(ua));
 }
 
 function notFound() {
-  return new Response('Not Found', { status: 404 });
+  return new Response('Not Found', {
+    status: 404,
+    headers: {
+      'Cache-Control': 'no-store',
+    },
+  });
 }
 
 function forbidden(message = 'Forbidden') {
-  return new Response(message, { status: 403 });
+  return new Response(message, {
+    status: 403,
+    headers: {
+      'Cache-Control': 'no-store',
+    },
+  });
+}
+
+function badGateway(message = 'Bad Gateway') {
+  return new Response(message, {
+    status: 502,
+    headers: {
+      'Cache-Control': 'no-store',
+    },
+  });
+}
+
+function sanitizeProxyHeaders(upstream) {
+  const headers = new Headers(upstream.headers);
+  headers.delete('server');
+  headers.delete('cf-ray');
+  headers.delete('x-powered-by');
+  headers.delete('via');
+  headers.set('Cache-Control', 'no-store');
+  return headers;
 }
 
 function copyForwardHeaders(request) {
@@ -41,64 +94,9 @@ function copyForwardHeaders(request) {
   if (authorization) {
     headers.set('Authorization', authorization);
   }
-  headers.set('User-Agent', 'assets-gateway/2.0');
+  headers.set('User-Agent', 'assets-gateway/3.0');
   headers.set('Accept', 'application/json, text/plain, */*');
   return headers;
-}
-
-function sanitizeProxyHeaders(upstream, canCache = false) {
-  const headers = new Headers(upstream.headers);
-  headers.delete('server');
-  headers.delete('cf-ray');
-  headers.delete('x-powered-by');
-  headers.delete('via');
-  if (canCache && upstream.ok) {
-    headers.set('Cache-Control', 'public, max-age=60');
-  } else {
-    headers.set('Cache-Control', 'no-store');
-  }
-  return headers;
-}
-
-async function proxyFirstHealthyJson(env, request, pathWithQuery) {
-  const originBases = getOriginBases(env);
-  let upstream;
-  let fallback;
-  for (const originBase of originBases) {
-    const originUrl = `${originBase}${pathWithQuery}`;
-    try {
-      const response = await fetch(originUrl, {
-        method: 'GET',
-        headers: copyForwardHeaders(request),
-        cf: {
-          cacheTtl: 0,
-          cacheEverything: false,
-        },
-      });
-      if (response.status >= 500) {
-        fallback = fallback || response;
-        continue;
-      }
-      preferredOriginBase = originBase;
-      upstream = response;
-      break;
-    } catch (_) {
-    }
-  }
-
-  if (!upstream) {
-    if (fallback) {
-      upstream = fallback;
-    } else {
-      return new Response('Bad Gateway', { status: 502 });
-    }
-  }
-
-  return new Response(upstream.body, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers: sanitizeProxyHeaders(upstream, false),
-  });
 }
 
 function parseBaseUrls(raw) {
@@ -127,6 +125,7 @@ function latestOriginResponse(env) {
       url: urls.join('; '),
     },
   };
+
   return new Response(JSON.stringify(payload), {
     status: 200,
     headers: {
@@ -136,216 +135,188 @@ function latestOriginResponse(env) {
   });
 }
 
-function normalizePrefix(rawPrefix) {
-  const prefix = `/${String(rawPrefix || '/json')
-    .trim()
-    .replace(/^\/+/, '')
-    .replace(/\/+$/, '')}`;
-  return prefix === '/' ? '/json' : prefix;
-}
-
-function getOriginBase(env) {
-  return getOriginBases(env)[0];
-}
-
-function getOriginSubPathPrefix(env) {
-  return normalizePrefix(env.ORIGIN_SUB_PATH_PREFIX || '/json');
-}
-
 function getHeaderSubId(request) {
-  const xSubId = (request.headers.get(SUB_ID_HEADER) || '').trim();
-  if (SUB_ID_RE.test(xSubId)) {
-    return xSubId;
+  const subId = (request.headers.get(SUB_ID_HEADER) || '').trim();
+  if (!SUB_ID_RE.test(subId)) {
+    return '';
   }
-
-  const subId = (request.headers.get(SUB_ID_HEADER_ALT) || '').trim();
-  if (SUB_ID_RE.test(subId)) {
-    return subId;
-  }
-
-  return '';
+  return subId;
 }
 
 function getHeaderSubKind(request) {
-  const xSubKind = (request.headers.get(SUB_KIND_HEADER) || '').trim();
-  if (KIND_RE.test(xSubKind)) {
-    return xSubKind;
+  const raw = (request.headers.get(SUB_KIND_HEADER) || '').trim();
+  if (!raw) {
+    return 'agent';
   }
-
-  const subKind = (request.headers.get(SUB_KIND_HEADER_ALT) || '').trim();
-  if (KIND_RE.test(subKind)) {
-    return subKind;
-  }
-
-  return '';
-}
-
-function splitPath(pathname) {
-  return String(pathname || '/')
-    .replace(/\/+$/, '')
-    .split('/')
-    .filter(Boolean);
-}
-
-function extractSubIdFromPath(pathname, routePrefix) {
-  const routeParts = splitPath(routePrefix);
-  const pathParts = splitPath(pathname);
-
-  if (pathParts.length < routeParts.length + 1) {
+  if (!KIND_RE.test(raw)) {
     return '';
   }
+  return raw;
+}
 
-  for (let i = 0; i < routeParts.length; i += 1) {
-    if (pathParts[i] !== routeParts[i]) {
-      return '';
+async function proxyFirstHealthyJson(env, request, pathWithQuery) {
+  const originBases = getOriginBases(env);
+  let upstream;
+  let fallback;
+
+  for (const originBase of originBases) {
+    const originUrl = `${originBase}${pathWithQuery}`;
+    try {
+      const response = await fetch(originUrl, {
+        method: 'GET',
+        headers: copyForwardHeaders(request),
+        cf: {
+          cacheTtl: 0,
+          cacheEverything: false,
+        },
+      });
+
+      if (response.status >= 500) {
+        fallback = fallback || response;
+        logWarn('orderinfo_origin_5xx', { originBase, status: response.status });
+        continue;
+      }
+
+      preferredOriginBase = originBase;
+      upstream = response;
+      break;
+    } catch (err) {
+      logWarn('orderinfo_origin_error', {
+        originBase,
+        message: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
-  const candidateId = (pathParts[routeParts.length] || '').trim();
-  if (!SUB_ID_RE.test(candidateId)) {
-    return '';
+  if (!upstream) {
+    if (fallback) {
+      upstream = fallback;
+    } else {
+      return badGateway();
+    }
   }
 
-  const kind = pathParts[routeParts.length + 1];
-  if (kind && !KIND_RE.test(kind)) {
-    return '';
-  }
-
-  return candidateId;
+  return new Response(upstream.body, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers: sanitizeProxyHeaders(upstream),
+  });
 }
 
-function extractAssetsSubIdFromPath(pathname) {
-  const pathParts = splitPath(pathname);
-  if (pathParts.length < 4) {
-    return '';
+async function proxyAssetsRequest(env, request, subId, subKind) {
+  const originBases = getOriginBases(env);
+  let upstream;
+  let fallback;
+
+  for (const originBase of originBases) {
+    const originUrl = `${originBase}${ASSETS_PATH}`;
+    const startAt = Date.now();
+
+    try {
+      const response = await fetch(originUrl, {
+        method: 'POST',
+        headers: {
+          'User-Agent': 'assets-gateway/3.0',
+          'Accept': 'application/json',
+          [SUB_ID_HEADER]: subId,
+          [SUB_KIND_HEADER]: subKind,
+        },
+        cf: {
+          cacheTtl: 0,
+          cacheEverything: false,
+        },
+      });
+
+      const cost = Date.now() - startAt;
+      logInfo('assets_upstream_result', {
+        originBase,
+        status: response.status,
+        cost_ms: cost,
+        sub_id: maskSubId(subId),
+      });
+
+      if (response.status >= 500) {
+        fallback = fallback || response;
+        continue;
+      }
+
+      preferredOriginBase = originBase;
+      upstream = response;
+      break;
+    } catch (err) {
+      logWarn('assets_upstream_error', {
+        originBase,
+        sub_id: maskSubId(subId),
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
-  if (pathParts[0] !== 'api' || pathParts[1] !== 'v1' || pathParts[2] !== 'assets') {
-    return '';
+  if (!upstream) {
+    if (fallback) {
+      upstream = fallback;
+    } else {
+      return badGateway();
+    }
   }
 
-  const candidateId = (pathParts[3] || '').trim();
-  if (!SUB_ID_RE.test(candidateId)) {
-    return '';
-  }
-
-  return candidateId;
-}
-
-function isLegacyPrefixPath(pathname, routePrefix) {
-  const normalizedPath = String(pathname || '/').replace(/\/+$/, '');
-  return normalizedPath === routePrefix || normalizedPath.startsWith(`${routePrefix}/`);
+  return new Response(upstream.body, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers: sanitizeProxyHeaders(upstream),
+  });
 }
 
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const url = new URL(request.url);
-    const routePrefix = normalizePrefix(env.ROUTE_PREFIX || '/json');
+    const path = normalizePath(url.pathname);
 
-    if (request.method === 'GET' && (url.pathname === '/api/v1/latest')) {
+    if (request.method === 'GET' && path === LATEST_PATH) {
       return latestOriginResponse(env);
     }
 
-    if (request.method === 'GET' && (url.pathname === '/api/v1/orderinfo')) {
+    if (request.method === 'GET' && path === ORDERINFO_PATH) {
       const ua = request.headers.get('User-Agent') || '';
       if (!isAllowedUa(ua)) {
+        logWarn('orderinfo_ua_rejected', { ua });
         return forbidden('UA not allowed');
       }
-      return proxyFirstHealthyJson(env, request, `/api/v1/user/getSubscribe${url.search || ''}`);
+      return proxyFirstHealthyJson(env, request, `${ORDERINFO_UPSTREAM_PATH}${url.search || ''}`);
     }
 
-    if (request.method !== 'GET' && request.method !== 'POST') {
-      return notFound();
-    }
-
-    const path = url.pathname;
-    let subId = extractAssetsSubIdFromPath(path) || extractSubIdFromPath(path, routePrefix);
-    const headerSubId = getHeaderSubId(request);
-    const headerSubKind = getHeaderSubKind(request);
-    const isByteflyPost = request.method === 'POST' && headerSubId !== '';
-    const isUnifiedAssetsGet = request.method === 'GET' && extractAssetsSubIdFromPath(path) !== '';
-    const isUnifiedAssetsPost = request.method === 'POST' && (path === '/api/v1/assets' || extractAssetsSubIdFromPath(path) !== '') && headerSubId !== '';
-
-    if (isUnifiedAssetsPost || isByteflyPost) {
-      subId = headerSubId;
-    } else if (!subId && isLegacyPrefixPath(path, routePrefix)) {
-      subId = headerSubId;
-    }
-
-    if (!subId) {
-      return request.method === 'GET' ? notFound() : forbidden('Invalid subscription id');
-    }
-
-    const ua = request.headers.get('User-Agent') || '';
-    if (!isAllowedUa(ua)) {
-      return forbidden('UA not allowed');
-    }
-
-    const originBases = getOriginBases(env);
-    const originSubPathPrefix = getOriginSubPathPrefix(env);
-    const cache = caches.default;
-    const canCache = request.method === 'GET' && !isUnifiedAssetsGet;
-    const cacheKey = request.url;
-
-    if (canCache) {
-      const cached = await cache.match(cacheKey);
-      if (cached) {
-        return cached;
+    if (request.method === 'POST' && path === ASSETS_PATH) {
+      if (url.search && url.search.length > 0) {
+        logWarn('assets_query_rejected', { query: url.search });
+        return forbidden('Query parameters are not supported');
       }
-    }
 
-    let upstream;
-    let fallback;
-    for (const originBase of originBases) {
-      const originPath = `${originBase}${originSubPathPrefix}/${subId}`;
-      const originUrl = (isUnifiedAssetsPost || isByteflyPost)
-        ? `${originPath}?envelope=1`
-        : originPath;
-      try {
-        const response = await fetch(originUrl, {
-          method: 'GET',
-          headers: {
-            'User-Agent': 'assets-gateway/2.0',
-            'Accept': '*/*',
-            ...(headerSubKind ? { [SUB_KIND_HEADER]: headerSubKind } : {}),
-          },
-          cf: {
-            cacheTtl: 0,
-            cacheEverything: false,
-          },
-        });
-        if (response.status >= 500) {
-          fallback = fallback || response;
-          continue;
-        }
-        preferredOriginBase = originBase;
-        upstream = response;
-        break;
-      } catch (_) {
+      const ua = request.headers.get('User-Agent') || '';
+      if (!isAllowedUa(ua)) {
+        logWarn('assets_ua_rejected', { ua });
+        return forbidden('UA not allowed');
       }
-    }
 
-    if (!upstream) {
-      if (fallback) {
-        upstream = fallback;
-      } else {
-        return new Response('Bad Gateway', { status: 502 });
+      const subId = getHeaderSubId(request);
+      if (!subId) {
+        logWarn('assets_missing_sub_id');
+        return forbidden('Invalid subscription id');
       }
-    }
 
-    const response = new Response(upstream.body, {
-      status: upstream.status,
-      statusText: upstream.statusText,
-      headers: sanitizeProxyHeaders(upstream, canCache),
-    });
-
-    if (canCache && upstream.ok) {
-      const cacheResponse = response.clone();
-      if (ctx && typeof ctx.waitUntil === 'function') {
-        ctx.waitUntil(cache.put(cacheKey, cacheResponse));
+      const subKind = getHeaderSubKind(request);
+      if (!subKind) {
+        logWarn('assets_invalid_sub_kind', { sub_id: maskSubId(subId) });
+        return forbidden('Invalid subscription kind');
       }
+
+      logInfo('assets_request_received', {
+        sub_id: maskSubId(subId),
+        sub_kind: subKind,
+      });
+
+      return proxyAssetsRequest(env, request, subId, subKind);
     }
 
-    return response;
+    return notFound();
   },
 };

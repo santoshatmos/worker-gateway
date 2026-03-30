@@ -26,10 +26,11 @@ async function readBodyPreview(response) {
 }
 
 async function assertJsonEnvelope(response, label) {
-  const text = await readBodyPreview(response);
+  const fullText = await response.text();
+  const preview = fullText.length > 1200 ? `${fullText.slice(0, 1200)}...` : fullText;
   console.log(`\n[${label}] status=${response.status} ${response.statusText}`);
   console.log(`[${label}] headers content-type=${response.headers.get("content-type") || ""}`);
-  console.log(`[${label}] body=${text}`);
+  console.log(`[${label}] body=${preview}`);
 
   if (!response.ok) {
     throw new Error(`${label} failed with HTTP ${response.status}`);
@@ -37,7 +38,7 @@ async function assertJsonEnvelope(response, label) {
 
   let parsed;
   try {
-    parsed = JSON.parse(text);
+    parsed = JSON.parse(fullText);
   } catch (error) {
     throw new Error(`${label} did not return JSON: ${error.message}`);
   }
@@ -72,10 +73,11 @@ async function assertPlainSubscription(response, label) {
 }
 
 async function assertLatestPayload(response, label) {
-  const text = await readBodyPreview(response);
+  const fullText = await response.text();
+  const preview = fullText.length > 1200 ? `${fullText.slice(0, 1200)}...` : fullText;
   console.log(`\n[${label}] status=${response.status} ${response.statusText}`);
   console.log(`[${label}] headers content-type=${response.headers.get("content-type") || ""}`);
-  console.log(`[${label}] body=${text}`);
+  console.log(`[${label}] body=${preview}`);
 
   if (!response.ok) {
     throw new Error(`${label} failed with HTTP ${response.status}`);
@@ -83,7 +85,7 @@ async function assertLatestPayload(response, label) {
 
   let parsed;
   try {
-    parsed = JSON.parse(text);
+    parsed = JSON.parse(fullText);
   } catch (error) {
     throw new Error(`${label} did not return JSON: ${error.message}`);
   }

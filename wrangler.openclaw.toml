@@ -4,12 +4,10 @@ compatibility_date = "2026-03-15"
 workers_dev = false
 
 routes = [
-  { pattern = "openclaw.atmoslogic.com/api/v1/assets*", zone_name = "atmoslogic.com" },
+  { pattern = "openclaw.atmoslogic.com/api/v1/assets", zone_name = "atmoslogic.com" },
   { pattern = "openclaw.atmoslogic.com/api/v1/latest", zone_name = "atmoslogic.com" },
   { pattern = "openclaw.atmoslogic.com/api/v1/orderinfo", zone_name = "atmoslogic.com" }
 ]
 
 [vars]
-ROUTE_PREFIX = "/json"
-ORIGIN_BASE = "https://api.hudie123.xyz;https://vpn2.hudie123.xyz;https://api2.an1688.com"
-ORIGIN_SUB_PATH_PREFIX = "/json"
+ORIGIN_BASE = "https://api.hudie123.xyz;https://vpn3.hudie123.xyz;https://api2.an1688.com"
